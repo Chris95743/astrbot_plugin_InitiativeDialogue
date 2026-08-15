@@ -165,22 +165,23 @@ class MessageManager:
             if not platform:
                 logger.error(f"无法获取平台实例: {platform_id}")
                 return False
-            
-            # 获取 bot 实例
-            bot = getattr(platform, 'bot', None)
-            if not bot:
-                logger.error(f"平台 {platform_id} 没有 bot 属性")
-                return False
-            
-            # 【修改】传递真实的平台元数据
+
+            # 根据平台元数据的适配器名称（而非用户自定义的 platform_id）分发到对应的事件构造逻辑
+            platform_name = platform.meta().name
+
             fake_event = self.create_fake_event(
                 message_str=adjusted_prompt,
-                bot=bot,
+                platform=platform,
+                platform_name=platform_name,
                 umo=unified_msg_origin,
                 sender_id=user_id,
                 session_id=session_id,
-                platform_meta=platform.meta(),  # 传递真实的平台元数据
+                platform_meta=platform.meta(),
             )
+            if not fake_event:
+                logger.error(f"暂不支持的平台类型: {platform_name}，无法发送主动消息")
+                return False
+
             platform.commit_event(fake_event)
             
             # 仅在为主动消息类型时添加到标记集合中
@@ -226,26 +227,30 @@ class MessageManager:
     def create_fake_event(
         self,
         message_str: str,
-        bot,
+        platform,
+        platform_name: str,
         umo: str,
         session_id: str,
         sender_id: str = "123456",
-        platform_meta=None,  # 【新增】接收平台元数据参数
+        platform_meta=None,
     ):
-        from astrbot.core.platform.platform_metadata import PlatformMetadata
-        from .aiocqhttp_message_event import AiocqhttpMessageEvent
+        """构造一个伪造的消息事件，用于借助框架的 LLM 请求管线发送主动消息
 
-        # 【修改】如果没有传入平台元数据，尝试从 umo 解析
-        if not platform_meta:
-            platform_name, _, _ = self.parse_unified_msg_origin(umo)
-            if not platform_name:
-                logger.warning(f"无法解析平台名称，使用默认值 'aiocqhttp'")
-                platform_name = "aiocqhttp"
-            platform_meta = PlatformMetadata(platform_name, "fake_adapter")
-            logger.info(f"从 UMO 解析平台名称: {platform_name}")
-        else:
-            logger.info(f"使用传入的平台元数据: {platform_meta.id}")
+        不同平台的消息事件类构造参数不同（例如 aiocqhttp 用 `bot`，telegram 用
+        `client`），因此按 `platform_name` 分发到各自的构造逻辑。
 
+        Args:
+            message_str: 消息文本内容
+            platform: 平台实例，用于获取发送消息所需的客户端对象
+            platform_name: 平台适配器名称（如 "aiocqhttp"、"telegram"）
+            umo: 统一消息来源
+            session_id: 会话id
+            sender_id: 发送者id
+            platform_meta: 平台元数据
+
+        Returns:
+            构造好的消息事件对象；如果平台不受支持则返回 None
+        """
         # 使用配置中的self_id
         self_id = self.parent.config.get("self_id", "")
         if not self_id:
@@ -257,35 +262,66 @@ class MessageManager:
         abm.message = [Plain(message_str)]
         abm.self_id = self_id  # 使用配置中的self_id
         abm.sender = MessageMember(user_id=sender_id)
-
-        if "group" in umo.lower():
-            # 群消息
-            group_id = umo.split("_")[-1] if "_" in umo else sender_id
-            abm.raw_message = {
-                "message_type": "group",
-                "group_id": int(group_id),
-                "user_id": int(sender_id),
-                "message": message_str,
-            }
-        else:
-            # 私聊消息
-            abm.raw_message = {
-                "message_type": "private",
-                "user_id": int(sender_id),
-                "message": message_str,
-            }
-
         abm.session_id = session_id
         abm.type = MessageType.FRIEND_MESSAGE
 
-        # 【修改】使用真实的平台元数据，而不是硬编码
-        event = AiocqhttpMessageEvent(
-            message_str=message_str,
-            message_obj=abm,
-            platform_meta=platform_meta,  # 使用真实的平台元数据
-            session_id=session_id,
-            bot=bot,
-        )
+        if platform_name == "aiocqhttp":
+            from .aiocqhttp_message_event import AiocqhttpMessageEvent
+
+            bot = getattr(platform, "bot", None)
+            if not bot:
+                logger.error(f"平台 {platform_name} 没有 bot 属性")
+                return None
+
+            if "group" in umo.lower():
+                # 群消息
+                group_id = umo.split("_")[-1] if "_" in umo else sender_id
+                abm.raw_message = {
+                    "message_type": "group",
+                    "group_id": int(group_id),
+                    "user_id": int(sender_id),
+                    "message": message_str,
+                }
+            else:
+                # 私聊消息
+                abm.raw_message = {
+                    "message_type": "private",
+                    "user_id": int(sender_id),
+                    "message": message_str,
+                }
+
+            event = AiocqhttpMessageEvent(
+                message_str=message_str,
+                message_obj=abm,
+                platform_meta=platform_meta,
+                session_id=session_id,
+                bot=bot,
+            )
+        elif platform_name == "telegram":
+            from astrbot.core.platform.sources.telegram.tg_event import (
+                TelegramPlatformEvent,
+            )
+
+            client = getattr(platform, "client", None)
+            if not client:
+                logger.error(f"平台 {platform_name} 没有 client 属性")
+                return None
+
+            # telegram 的 raw_message 仅在框架内部读取原消息时使用，主动消息没有
+            # 真实的原始 Update，留空即可，不影响发送
+            abm.raw_message = None
+
+            event = TelegramPlatformEvent(
+                message_str=message_str,
+                message_obj=abm,
+                platform_meta=platform_meta,
+                session_id=session_id,
+                client=client,
+            )
+        else:
+            logger.error(f"暂不支持的平台类型: {platform_name}")
+            return None
+
         event.is_wake = True
         event.call_llm = False
 
