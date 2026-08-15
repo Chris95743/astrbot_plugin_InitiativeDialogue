@@ -1,8 +1,8 @@
 {
     "self_id": {
-        "description": "机器人自己的QQ号",
+        "description": "机器人自己的标识",
         "type": "string",
-        "hint": "请填写机器人自己的QQ号，这是必填项",
+        "hint": "QQ(aiocqhttp)平台请填写机器人的QQ号；Telegram平台请填写机器人的bot_name，这是必填项",
         "default": ""
     },
     "time_settings": {
