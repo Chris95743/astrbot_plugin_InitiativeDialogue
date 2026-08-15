@@ -1,5 +1,7 @@
 修改了原项目中/utils/message_manager.py的部分逻辑，使bot在主动发起对话的时候可以在原有的会话id基础上回复消息，不会再生成一个id为None的会话
 
+修改了原项目中/utils/message_manager.py的部分逻辑，兼容Telegram，bot_name 是 BotFather 给你的机器人链接 t.me/xxx_bot 中去掉链接里的 t.me/ 前缀的xxx_bot那部分）。
+
 </div>
 
 <div align="center">
